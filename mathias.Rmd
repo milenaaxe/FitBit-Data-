@@ -1,0 +1,216 @@
+---
+title: "FitBit"
+author: "Milena Dufour"
+date: "12/12/2021"
+output: html_document
+---
+
+```{r}
+library(pacman)
+library(readxl)
+p_load(xgboost, fastAdaboost,ada, fastDummies, tidyverse, vtable, ROCR, Matrix, caret, stringr, randomForest, car, Rcpp)
+p_load(tidyverse, devtools, vtable, ggthemes, lubridate, ggplot2, graphics)
+p_load(formattable,scales)
+p_load(rpart, tidyverse, rpart.plot, DMwR2, caTools)
+
+fitbit <- read_excel("newfitbit.xlsx")
+
+
+#Change NA values in Event column to Regular Day
+fitbit$Event <- as.character(fitbit$Event)
+fitbit$Event[is.na(fitbit$Event)] <- "Regular Week"
+
+
+
+fitbit %>%
+  mutate(AvgWeight = mean(Weight, na.rm=T),
+            AvgFat = mean(BodyFat, na.rm=T),
+            AvgSteps = mean(Steps, na.rm=T),
+            AvgAlcohol = mean(AlcoholCals, na.rm=T),
+            AvgCalAte = mean(CalConsumed, na.rm=T),
+            AvgCalBurn = mean(CalBurn, na.rm=T)) -> fitbit1
+
+#Average Alcohol Calories per Month for the last 3 years
+
+fitbit1 %>%
+  ggplot(mapping = aes(y = AvgAlcohol, x = Month, fill = Month)) +
+  geom_bar(stat = 'identity')
+ 
+# Boxplot of Body Fat by Month
+fitbit %>% 
+  ggplot(aes(x = Month, y = BodyFat)) + 
+  geom_boxplot()
+
+fitbit1 %>%
+  ggplot(aes(x= fct_inorder(Month), y = AlcoholCals, fill = Weight))+
+  geom_bar(stat = "identity")
+
+
+
+#Mathias weighs less normally in the colder months (Fall and Winter)
+```
+```{r}
+#creating a loop for all reviews in "Review.Score.Rating"
+
+
+
+Season <- vector(mode = "character", length = nrow(fitbit1))
+
+for (i in 1: nrow(fitbit1))
+{
+Season[i] = ifelse(fitbit1$Month[i] == "January" & fitbit1$Month[i] == "December" & fitbit1$Month[i] == "February" , "Winter",
+                   ifelse(fitbit1$Month[i] == "March" & fitbit1$Month[i] == "April" & fitbit1$Month[i] == "May" , "Spring",
+                   ifelse(fitbit1$Month[i] == "June" & fitbit1$Month[i] == "July" & fitbit1$Month[i] == "August" , "Summer",
+                   ifelse(fitbit1$Month[i] == "September" & fitbit1$Month[i] == "October" & fitbit1$Month[i] == "November", "Fall"
+                        
+))))
+}
+
+data.frame(fitbit1, Season) -> fitbit2
+sumtable(fitbit2)
+```
+
+
+
+
+Decision Tree 
+```{r}
+
+p_load(rpart, rpart.plot)
+Tree <- rpart(CalBurn ~ Month + Weight + BodyFat+  CalConsumed + Deficit + Steps + ActiveMin + Floors + Miles + HourlyActivity + RestHeart + AlcoholCals + Event, data=fitbit, control = rpart.control(cp = 0.0001))
+summary(Tree)
+barplot(Tree$variable.importance)
+
+bestcp <- Tree$cptable[which.min(Tree$cptable[,"xerror"]),"CP"]
+
+prunedTree <- prune(Tree, cp = bestcp)
+rpart.plot(prunedTree, type=5)
+
+
+prp(prunedTree,
+type = 2, # left and right split labels (see Figure 2)
+clip.right.labs = FALSE, # full right split labels
+extra = 101, # show nbr of obs and percentages (see Figure 3)
+under = TRUE, # position extra info _under_ the boxes
+under.cex = 1, # size of text under the boxes (default is .8)
+fallen.leaves = TRUE, # put leaves at the bottom of plot
+box.palette = "RdYlGn", # color of the boxes
+branch = .9, # branch lines with narrow shoulders and down slopes
+round = 0, # no rounding of node corners i.e. use rectangles
+leaf.round = 9, # round leaf nodes (for leaves, this supersedes the round arg)
+prefix = "Based On",
+main = "Body Fat ...", # main title
+cex.main = 1.5, # use big text for main title
+branch.col = "black", # color of branch lines
+branch.lwd = 0.9) # line width of branch lines
+```
+
+```{r}
+#Correlations
+library(corrplot)
+library(RColorBrewer)
+corrrr <-cor(fitbit$BodyFat, fitbit$Deficit)
+
+
+fitbit %>%
+  group_by(Month) %>%
+  summarise(Sum = sum(AlcoholCals))
+
+#Highest calorie months were June, December, and July
+#Lowest three were March (by a significant amount). February, and April
+
+fitbit %>%
+  group_by(Month) %>%
+  summarise(SumSteps = sum(Steps)) %>%
+  ggplot(aes(x = SumSteps, y = Month, fill = Month)) + geom_bar(stat = "identity") + coord_flip()
+#Best months for steps are August, October, and July
+#Worst months for steps are March, April, and February
+
+fitbit %>%
+  group_by(Month) %>%
+  summarise(Sum = sum(CalConsumed)) %>%
+  ggplot(aes(x = Sum, y = Month, fill = Month)) + geom_bar(stat = "identity") + coord_flip()
+#Most calories consumed in May, October, August
+#Least calories consumed in January, February, and April
+
+fitbit %>%
+  group_by(Month) %>%
+  summarise(Weight = mean(Weight)) %>%
+  ggplot(aes(x = Weight, y = Month, fill = Month)) + geom_histogram(stat = "identity")
+#Heaviest months are July, June, May
+#Lightest months are January, February, October
+
+fitbit %>%
+  group_by(Month) %>%
+  summarise(Weight = mean(BodyFat))
+#Most fat % June, July, May (directly related to weight, obviously)
+
+
+fitbit %>%
+  group_by(Month) %>%
+  summarise(Weight = mean(Weight), Alc = sum(AlcoholCals))
+```
+
+
+```{r}
+#Add in the row number - unique ID
+fitbit <- fitbit %>% mutate(RowNumber = as.factor(Event),
+                              id = row_number())
+# Sample randomly 70% to be our training set:
+Train <- fitbit %>% sample_frac(0.7)
+
+#Take the rest (anti-join) to be our test set:
+Test <- fitbit %>% anti_join(Train, by="id")
+```
+
+
+```{r}
+Forest <- randomForest(CalBurn ~ Month + Weight + BodyFat + CalConsumed + Deficit + Steps + ActiveMin + Floors + Miles + HourlyActivity + RestHeart + AlcoholCals + Event, data=fitbit, ntree=10, mtry = 3, importance = TRUE, sampsize = nrow(Test), replace = TRUE)
+plot(Forest)
+View(Forest$importance)
+###
+
+
+impp=as.data.frame(importance(Forest))
+impp=cbind(vars=rownames(impp),impp)
+names(impp)[names(impp) == '%IncMSE'] <- 'Percent.IncMSE'
+
+ggplot(impp, aes(x=reorder(vars, Percent.IncMSE), y=Percent.IncMSE
+)) + geom_bar(stat="identity", color="black", fill = rainbow(n=length(impp$vars))) +
+labs(x="Variable for Random Forest", y=" Level of Importance (%IncMSE)") + coord_flip()
+```
+```{r}
+
+fitbit %>%
+  select(Weight) %>%
+  summarise(min = max(Weight))
+
+Weight1 <- vector(mode = "character", length = nrow(fitbit))
+
+for (i in 1: nrow(fitbit))
+{
+Weight1[i] = ifelse(fitbit$Weight[i] >= 175.4 & fitbit$Weight[i] <= 175.9 , "175",
+                    ifelse(fitbit$Weight[i] >= 176 & fitbit$Weight[i] <= 176.9 , "176",
+                           ifelse(fitbit$Weight[i] >= 177 & fitbit$Weight[i] <= 177.9 , "177",
+                                  ifelse(fitbit$Weight[i] >= 178 & fitbit$Weight[i] <= 178.9 , "178",
+                                         ifelse(fitbit$Weight[i] >= 179 & fitbit$Weight[i] <= 179.9 , "179",
+                                                ifelse(fitbit$Weight[i] >= 180 & fitbit$Weight[i] <= 180.9 , "180",
+                                                       ifelse(fitbit$Weight[i] >= 181 & fitbit$Weight[i] <= 181.9 , "181",
+                                                              ifelse(fitbit$Weight[i] >= 182 & fitbit$Weight[i] <= 182.9 , "182",
+                                                                     ifelse(fitbit$Weight[i] >= 183 & fitbit$Weight[i] <= 183.9 , "183",
+                                                                            ifelse(fitbit$Weight[i] >= 184 & fitbit$Weight[i] <= 184.9 , "184",
+                                                                                   ifelse(fitbit$Weight[i] >= 185 & fitbit$Weight[i] <= 185.9 , "185",
+                                                                                          ifelse(fitbit$Weight[i] >= 186 & fitbit$Weight[i] <= 186.9 , "186",
+                                                                                                 ifelse(fitbit$Weight[i] >= 187 & fitbit$Weight[i] <= 187.9 , "187",
+                                                                            "188"
+                        
+)))))))))))))
+}
+
+data.frame(fitbit, Weight1) -> fitbit
+sumtable(fitbit)
+
+fitbit %>%
+select(Weight1, CalConsumed) %>% table %>% prop.table(1)
+```
+
